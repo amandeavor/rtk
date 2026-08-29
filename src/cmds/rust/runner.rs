@@ -184,9 +184,16 @@ fn extract_test_summary(output: &str, command: &str) -> String {
 
     let is_cargo = command.contains("cargo test");
     let is_pytest = command.contains("pytest");
-    let is_jest =
-        command.contains("jest") || command.contains("npm test") || command.contains("yarn test");
+    let is_jest = command.contains("jest")
+        || command.contains("npm test")
+        || command.contains("yarn test")
+        || command.contains("node --test");
     let is_go = command.contains("go test");
+    let has_node_test_summary = lines.iter().any(|line| {
+        line.trim_start()
+            .strip_prefix('ℹ')
+            .is_some_and(|summary| summary.trim_start().starts_with("fail "))
+    });
 
     let mut failures = Vec::new();
     let mut in_failure = false;
@@ -218,10 +225,27 @@ fn extract_test_summary(output: &str, command: &str) -> String {
         }
 
         if is_jest {
-            if line.contains("Tests:") || line.contains("Test Suites:") {
+            let trimmed = line.trim_start();
+            let is_node_summary = trimmed.strip_prefix('ℹ').is_some_and(|summary| {
+                matches!(
+                    summary.split_whitespace().next(),
+                    Some(
+                        "tests"
+                            | "suites"
+                            | "pass"
+                            | "fail"
+                            | "cancelled"
+                            | "skipped"
+                            | "todo"
+                            | "duration_ms"
+                    )
+                )
+            });
+            if line.contains("Tests:") || line.contains("Test Suites:") || is_node_summary {
                 result.push(line.to_string());
             }
-            if line.contains("✕") || line.contains("FAIL") {
+            let is_node_failure = trimmed.starts_with('✕') || trimmed.starts_with('✖');
+            if is_node_failure || (!has_node_test_summary && line.contains("FAIL")) {
                 failures.push(line.to_string());
             }
         }
@@ -289,5 +313,39 @@ mod tests {
         let filtered = filter_errors(output);
         assert!(filtered.contains("error"));
         assert!(!filtered.contains("info"));
+    }
+
+    #[test]
+    fn node_test_name_containing_fail_is_not_a_failure() {
+        let output = "✔ contains uppercase word FAIL in the name (0.45ms)\n\
+ℹ tests 1\n\
+ℹ suites 0\n\
+ℹ pass 1\n\
+ℹ fail 0\n\
+ℹ cancelled 0\n\
+ℹ skipped 0\n\
+ℹ todo 0\n\
+ℹ duration_ms 57.6223\n";
+
+        let filtered = extract_test_summary(output, "npm test");
+
+        assert!(!filtered.contains("[FAIL]"), "got: {filtered}");
+        assert!(filtered.contains("ℹ fail 0"), "got: {filtered}");
+    }
+
+    #[test]
+    fn node_test_failure_uses_status_glyph_with_structured_summary() {
+        let output = "✖ rejects a FAIL response (0.45ms)\n\
+ℹ tests 1\n\
+ℹ suites 0\n\
+ℹ pass 0\n\
+ℹ fail 1\n\
+ℹ duration_ms 57.6223\n";
+
+        let filtered = extract_test_summary(output, "node --test repro.test.js");
+
+        assert!(filtered.contains("[FAIL]"), "got: {filtered}");
+        assert!(filtered.contains("✖ rejects a FAIL response"), "got: {filtered}");
+        assert!(filtered.contains("ℹ fail 1"), "got: {filtered}");
     }
 }
