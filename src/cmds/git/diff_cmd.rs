@@ -173,13 +173,8 @@ fn condense_unified_diff(diff: &str) -> String {
             if line.starts_with("+++ ") {
                 if !current_file.is_empty() && (added > 0 || removed > 0) {
                     result.push(format!("[file] {} (+{} -{})", current_file, added, removed));
-                    for c in &changes {
-                        result.push(format!("  {}", c));
-                    }
-                    let total = added + removed;
-                    if total > 10 {
-                        result.push(format!("  ... +{} more", total - 10));
-                    }
+                    // Column 0: anchored greps (`^[+-]`) must match these.
+                    result.append(&mut changes);
                 }
                 current_file = line
                     .trim_start_matches("+++ ")
@@ -201,13 +196,8 @@ fn condense_unified_diff(diff: &str) -> String {
     // Last file
     if !current_file.is_empty() && (added > 0 || removed > 0) {
         result.push(format!("[file] {} (+{} -{})", current_file, added, removed));
-        for c in &changes {
-            result.push(format!("  {}", c));
-        }
-        let total = added + removed;
-        if total > 10 {
-            result.push(format!("  ... +{} more", total - 10));
-        }
+        // Column 0: anchored greps (`^[+-]`) must match these.
+        result.append(&mut changes);
     }
 
     result.join("\n")
@@ -403,12 +393,44 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
+    fn test_condense_unified_diff_markers_at_column_0() {
+        // Indented markers make anchored greps (`^[+-]`) match nothing, so a
+        // "was anything removed?" audit answers no while the content is there.
+        //
+        // Two files on purpose. A file's changes are flushed at two separate
+        // sites: once per `+++` for the preceding file, once after the loop for
+        // the last one. A single-file fixture only ever reaches the second, so
+        // the first could be reverted with the whole suite still green.
+        let diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-fn old() {}\n+fn new() {}\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-let x = 1;\n+let x = 2;\n";
+        let result = condense_unified_diff(diff);
+        for want in ["-fn old() {}", "+fn new() {}", "-let x = 1;", "+let x = 2;"] {
+            assert!(
+                result.lines().any(|l| l == want),
+                "missing {want:?} at column 0 in:\n{}",
+                result
+            );
+        }
+        // Match on leading whitespace rather than a single space: the indent
+        // this guards against is two spaces, so `" +"` / `" -"` would never
+        // fire and the assertion would pass on the very code it rejects.
+        assert!(
+            !result.lines().any(|l| {
+                let trimmed = l.trim_start();
+                trimmed.len() != l.len()
+                    && (trimmed.starts_with('+') || trimmed.starts_with('-'))
+            }),
+            "change lines must not be indented:\n{}",
+            result
+        );
+    }
+
+    #[test]
     fn test_condense_unified_diff_empty() {
         let result = condense_unified_diff("");
         assert!(result.is_empty());
     }
 
-    // --- truncation accuracy ---
+    // --- overflow indicator ---
 
     fn make_large_unified_diff(added: usize, removed: usize) -> String {
         let mut lines = vec![
@@ -427,26 +449,29 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
-    fn test_condense_unified_diff_overflow_count_accuracy() {
-        // 100 added + 100 removed = 200 total changes, only 10 shown
-        // True overflow = 200 - 10 = 190
-        // Bug: changes vec capped at 15, so old code showed "+5 more" (15-10) instead of "+190 more"
+    fn test_condense_unified_diff_large_no_false_overflow_indicator() {
+        // All 200 changes are shown in full (never truncate diff content).
+        // No misleading "... +N more" should appear.
         let diff = make_large_unified_diff(100, 100);
         let result = condense_unified_diff(&diff);
         assert!(
-            result.contains("+190 more"),
-            "Expected '+190 more' but got:\n{}",
+            !result.contains("more"),
+            "No overflow indicator expected when all lines are shown, got:\n{}",
             result
         );
         assert!(
-            !result.contains("+5 more"),
-            "Bug still present: showing '+5 more' instead of true overflow"
+            result.contains("+new_value_99"),
+            "Last added line must be present (no truncation)"
+        );
+        assert!(
+            result.contains("-old_value_99"),
+            "Last removed line must be present (no truncation)"
         );
     }
 
     #[test]
     fn test_condense_unified_diff_no_false_overflow() {
-        // 8 changes total — all fit within the 10-line display cap, no overflow message
+        // Counter-case to the 200-change test above: no indicator at small sizes either.
         let diff = make_large_unified_diff(4, 4);
         let result = condense_unified_diff(&diff);
         assert!(

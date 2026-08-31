@@ -22,8 +22,8 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::scala::sbt_cmd;
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
-    summary, tree, wc_cmd,
+    ctest_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
+    read, search, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -313,8 +313,16 @@ enum Commands {
 
     /// Compact grep - strips whitespace, truncates, groups by file
     Grep {
+        // rtk's own options here are long-only: a short form shadows the native
+        // grep/rg flag of the same letter and captures it before it can reach
+        // src/cmds/system/search.rs, the shared filter behind `rtk grep` and
+        // `rtk rg`.
         /// Max line length
-        #[arg(short = 'l', long, default_value = "80")]
+        // No short: `-l` is grep's --files-with-matches. Bound to a `usize` it
+        // accepted numeric patterns -- `rtk grep -l 8080 a.txt b.txt` set
+        // max_len=8080, took a.txt as the pattern, and returned empty output
+        // with no error.
+        #[arg(long, default_value = "80")]
         max_len: usize,
         /// Max results to show
         // No short: `-m` is GNU grep's --max-count (stop after N matches per
@@ -328,9 +336,9 @@ enum Commands {
         /// Show only match context (not full line)
         #[arg(long)]
         context_only: bool,
-        /// Filter by file type (e.g., ts, py, rust)
-        #[arg(short = 't', long)]
-        file_type: Option<String>,
+        // No --file-type: `-t TYPE` is rg's type filter and the option never
+        // reached the engine, so `rtk rg -t rust` filters by type while
+        // `rtk grep -t rust` surfaces grep's own error.
         /// Pattern, path, and any grep/rg flags (e.g. -v, -i, -A 3, --glob, --version)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
@@ -503,6 +511,14 @@ enum Commands {
     /// Vitest commands with compact output
     Vitest {
         /// Additional vitest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// CTest with compact output
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Ctest {
+        /// Additional ctest arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -828,6 +844,14 @@ enum Commands {
     /// Apache Maven wrapper with compact output (test, integration-test, compile, package, install, verify, deploy)
     #[command(name = "mvn")]
     Mvn {
+        /// Maven goals and arguments (e.g., clean install, -DskipTests test, -X)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Maven Daemon (mvnd) with compact output — same filters as `rtk mvn`
+    #[command(name = "mvnd")]
+    Mvnd {
         /// Maven goals and arguments (e.g., clean install, -DskipTests test, -X)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1989,7 +2013,6 @@ fn run_cli() -> Result<i32> {
             max_len,
             max,
             context_only,
-            file_type: _,
             extra_args,
         } => search::run(
             search::Engine::Grep,
@@ -2203,6 +2226,8 @@ fn run_cli() -> Result<i32> {
         Commands::Jest { ref args } | Commands::Vitest { ref args } => {
             vitest_cmd::run_test(&cli.command, args, cli.verbose)?
         }
+
+        Commands::Ctest { args } => ctest_cmd::run(&args, cli.verbose)?,
 
         Commands::Prisma { command } => match command {
             PrismaCommands::Generate { args } => {
@@ -2432,6 +2457,8 @@ fn run_cli() -> Result<i32> {
         Commands::Gradlew { args } => gradlew_cmd::run(&args, cli.verbose)?,
 
         Commands::Mvn { args } => mvn_cmd::run(&args, cli.verbose)?,
+
+        Commands::Mvnd { args } => mvn_cmd::run_daemon(&args, cli.verbose)?,
 
         Commands::HookAudit { since } => {
             hooks::hook_audit_cmd::run(since, cli.verbose)?;
@@ -2764,6 +2791,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rg { .. }
             | Commands::Wget { .. }
             | Commands::Vitest { .. }
+            | Commands::Ctest { .. }
             | Commands::Prisma { .. }
             | Commands::Tsc { .. }
             | Commands::Next { .. }
@@ -3164,6 +3192,7 @@ mod tests {
             "wc",
             "jest",
             "vitest",
+            "ctest",
             "prisma",
             "tsc",
             "next",
@@ -3187,6 +3216,7 @@ mod tests {
             "golangci-lint",
             "gradlew",
             "mvn",
+            "mvnd",
             "sbt",
             "php",
             "phpunit",
@@ -3236,6 +3266,17 @@ mod tests {
                 assert_eq!(args, vec!["echo", "hello"]);
             }
             _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_ctest_help_and_version_passthrough_args() {
+        for flag in ["--help", "--version"] {
+            let cli = Cli::try_parse_from(["rtk", "ctest", flag]).unwrap();
+            match cli.command {
+                Commands::Ctest { args } => assert_eq!(args, vec![flag]),
+                _ => panic!("Expected Ctest command"),
+            }
         }
     }
 
@@ -3660,5 +3701,165 @@ mod tests {
             }
             _ => panic!("Expected Init command"),
         }
+    }
+
+    // --- grep argument routing (clap layer) ---
+    //
+    // The `Grep` variant funnels the pattern, path, and every native grep/rg flag
+    // into one trailing slot so `src/cmds/system/search.rs` parses them with full
+    // grep/rg semantics. These tests pin that routing.
+
+    /// Parse `rtk grep …` and return the captured `extra_args`, or `None` if
+    /// clap rejects the invocation (e.g. a colliding short option mis-binds).
+    fn grep_extra_args(args: &[&str]) -> Option<Vec<String>> {
+        match Cli::try_parse_from(args).ok()?.command {
+            Commands::Grep { extra_args, .. } => Some(extra_args),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_grep_parse_simple_pattern_path() {
+        assert_eq!(
+            grep_extra_args(&["rtk", "grep", "FOO", "src/"]).unwrap(),
+            vec!["FOO", "src/"]
+        );
+    }
+
+    #[test]
+    fn test_grep_parse_combined_short_cluster() {
+        // `-rn` is a native grep cluster (recursive + line-numbers); it must
+        // reach search.rs intact, not be intercepted by clap.
+        assert_eq!(
+            grep_extra_args(&["rtk", "grep", "-rn", "FOO", "src/"]).unwrap(),
+            vec!["-rn", "FOO", "src/"]
+        );
+    }
+
+    #[test]
+    fn test_grep_parse_value_flag_after_context() {
+        // `-A 3` (after-context) — the value must not be stolen by clap.
+        assert_eq!(
+            grep_extra_args(&["rtk", "grep", "-A", "3", "FOO", "file"]).unwrap(),
+            vec!["-A", "3", "FOO", "file"]
+        );
+    }
+
+    #[test]
+    fn test_grep_parse_invert_match_v_not_shadowed() {
+        // `-v` (invert-match) must reach grep, not be captured as rtk's
+        // top-level verbose flag.
+        assert_eq!(
+            grep_extra_args(&["rtk", "grep", "-v", "FOO", "file"]).unwrap(),
+            vec!["-v", "FOO", "file"]
+        );
+    }
+
+    #[test]
+    fn test_grep_parse_alternation_pattern_intact() {
+        // Extended-regex alternation must pass through untouched.
+        assert_eq!(
+            grep_extra_args(&["rtk", "grep", "-nE", "a|b", "file"]).unwrap(),
+            vec!["-nE", "a|b", "file"]
+        );
+    }
+
+    #[test]
+    fn test_grep_parse_files_with_matches_l() {
+        // Native grep `-l` (files-with-matches). Must parse and pass `-l` through.
+        assert_eq!(
+            grep_extra_args(&["rtk", "grep", "-l", "FOO", "src/"]).unwrap(),
+            vec!["-l", "FOO", "src/"]
+        );
+    }
+
+    #[test]
+    fn test_grep_parse_type_t_forwarded() {
+        // `-t TYPE` is rg-only and must reach the engine: `rtk rg` filters by
+        // type, `rtk grep` surfaces grep's own `invalid option -- 't'`.
+        assert_eq!(
+            grep_extra_args(&["rtk", "grep", "-t", "rust", "FOO", "src/"]).unwrap(),
+            vec!["-t", "rust", "FOO", "src/"]
+        );
+    }
+
+    #[test]
+    fn test_grep_file_type_option_is_gone() {
+        // `--file-type` was removed, not merely un-shorted: an unknown long flag
+        // routes to extra_args and is the engine's problem. Re-adding the option
+        // would bind it here and cost extra_args these two tokens.
+        assert_eq!(
+            grep_extra_args(&["rtk", "grep", "--file-type", "rust", "FOO", "src/"]).unwrap(),
+            vec!["--file-type", "rust", "FOO", "src/"]
+        );
+    }
+
+    /// Parse `rtk grep …` into the full `Grep` field set for inspection.
+    fn parse_grep(args: &[&str]) -> Result<(usize, usize, bool, Vec<String>), clap::Error> {
+        match Cli::try_parse_from(args)?.command {
+            Commands::Grep {
+                max_len,
+                max,
+                context_only,
+                extra_args,
+            } => Ok((max_len, max, context_only, extra_args)),
+            _ => unreachable!("parsed a grep command"),
+        }
+    }
+
+    #[test]
+    fn test_grep_long_options_bind_before_pattern() {
+        // Long-only knobs must still bind when placed before the pattern, with
+        // only the pattern/path landing in extra_args.
+        let (max_len, max, context_only, extra_args) = parse_grep(&[
+            "rtk",
+            "grep",
+            "--max-len",
+            "40",
+            "--max",
+            "5",
+            "--context-only",
+            "FOO",
+            "path",
+        ])
+        .unwrap();
+        assert_eq!(max_len, 40);
+        assert_eq!(max, 5);
+        assert!(context_only);
+        assert_eq!(extra_args, vec!["FOO", "path"]);
+    }
+
+    #[test]
+    fn test_grep_options_after_pattern_stay_in_extra_args() {
+        // Once the pattern starts the trailing slot, later tokens — even rtk's
+        // own `--max-len` — pass through verbatim rather than binding as options.
+        // The mechanism is `allow_hyphen_values`, not `trailing_var_arg`.
+        let (max_len, _, _, extra_args) =
+            parse_grep(&["rtk", "grep", "FOO", "--max-len", "40"]).unwrap();
+        assert_eq!(
+            max_len, 80,
+            "option after pattern must NOT bind (default kept)"
+        );
+        assert_eq!(extra_args, vec!["FOO", "--max-len", "40"]);
+    }
+
+    #[test]
+    fn test_grep_version_routes_to_extra_args() {
+        // `--version` is not a subcommand flag (version isn't propagated), so it
+        // lands in extra_args, and search::run's --version/--help check execs it
+        // against the engine unfiltered.
+        assert_eq!(
+            grep_extra_args(&["rtk", "grep", "--version"]).unwrap(),
+            vec!["--version"]
+        );
+    }
+
+    #[test]
+    fn test_grep_double_dash_consumed_by_clap() {
+        // clap strips the `--` separator before populating trailing_var_arg.
+        // core::args_utils::restore_double_dash re-inserts it at runtime — this
+        // test pins the premise that helper depends on.
+        let (_, _, _, extra_args) = parse_grep(&["rtk", "grep", "--", "-v", "file"]).unwrap();
+        assert_eq!(extra_args, vec!["-v", "file"], "clap must consume the --");
     }
 }
