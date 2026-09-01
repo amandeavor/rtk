@@ -470,13 +470,27 @@ fn strip_absolute_path(cmd: &str) -> String {
     }
 }
 
+static SUDO_PREFIX_ANALYTICS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:sudo(?:\s+-[A-Za-z0-9_-]+(?:\s+\S+)?)*\s+)").unwrap()
+});
+
 pub fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {
     prefix_part.contains("RTK_DISABLED=")
 }
 
+/// Strip RTK_DISABLED=X and other env prefixes for analytics, skipping leading `sudo` and flags if present.
+pub fn strip_disabled_prefix_for_analytics(cmd: &str) -> (&str, &str) {
+    let trimmed = cmd.trim();
+    let after_sudo = SUDO_PREFIX_ANALYTICS.replace(trimmed, "");
+    let sudo_len = trimmed.len() - after_sudo.len();
+    let (_env_part, rest) = strip_disabled_prefix(&trimmed[sudo_len..]);
+    let full_prefix_len = trimmed.len() - rest.len();
+    (&trimmed[..full_prefix_len], rest)
+}
+
 /// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
 pub fn cmd_has_rtk_disabled_prefix(cmd: &str) -> bool {
-    let (prefix_part, _) = strip_disabled_prefix(cmd);
+    let (prefix_part, _) = strip_disabled_prefix_for_analytics(cmd);
     prefix_contains_rtk_disabled(prefix_part)
 }
 
@@ -5137,9 +5151,19 @@ mod tests {
         assert!(cmd_has_rtk_disabled_prefix(
             "RTK_DISABLED=true git log --oneline"
         ));
+        assert!(cmd_has_rtk_disabled_prefix(
+            "sudo RTK_DISABLED=1 docker ps"
+        ));
+        assert!(cmd_has_rtk_disabled_prefix(
+            "sudo -E RTK_DISABLED=1 docker ps"
+        ));
+        assert!(cmd_has_rtk_disabled_prefix(
+            "RTK_DISABLED=1 sudo docker ps"
+        ));
         assert!(!cmd_has_rtk_disabled_prefix("git status"));
         assert!(!cmd_has_rtk_disabled_prefix("rtk git status"));
         assert!(!cmd_has_rtk_disabled_prefix("SOME_VAR=1 git status"));
+        assert!(!cmd_has_rtk_disabled_prefix("sudo docker ps"));
     }
 
     #[test]
@@ -5153,6 +5177,22 @@ mod tests {
             ("FOO=1 RTK_DISABLED=1 ", "cargo test")
         );
         assert_eq!(strip_disabled_prefix("git status"), ("", "git status"));
+    }
+
+    #[test]
+    fn test_strip_disabled_prefix_for_analytics() {
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo RTK_DISABLED=1 docker ps"),
+            ("sudo RTK_DISABLED=1 ", "docker ps")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("sudo -E RTK_DISABLED=1 docker ps"),
+            ("sudo -E RTK_DISABLED=1 ", "docker ps")
+        );
+        assert_eq!(
+            strip_disabled_prefix_for_analytics("RTK_DISABLED=1 sudo docker ps"),
+            ("RTK_DISABLED=1 sudo ", "docker ps")
+        );
     }
 
     // --- #485: absolute path normalization ---
