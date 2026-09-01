@@ -178,6 +178,41 @@ fn filter_errors(output: &str) -> String {
     result.join("\n")
 }
 
+fn node_test_summary_key(line: &str) -> Option<&str> {
+    let summary = line.trim_start().strip_prefix('ℹ')?.trim_start();
+    let mut fields = summary.split_whitespace();
+    let key = fields.next()?;
+    let value = fields.next()?;
+
+    if fields.next().is_some() {
+        return None;
+    }
+
+    let is_valid_value = if key == "duration_ms" {
+        value.parse::<f64>().is_ok()
+    } else {
+        value.parse::<u64>().is_ok()
+    };
+
+    if is_valid_value
+        && matches!(
+            key,
+            "tests"
+                | "suites"
+                | "pass"
+                | "fail"
+                | "cancelled"
+                | "skipped"
+                | "todo"
+                | "duration_ms"
+        )
+    {
+        Some(key)
+    } else {
+        None
+    }
+}
+
 fn extract_test_summary(output: &str, command: &str) -> String {
     let mut result = Vec::new();
     let lines: Vec<&str> = output.lines().collect();
@@ -189,10 +224,10 @@ fn extract_test_summary(output: &str, command: &str) -> String {
         || command.contains("yarn test")
         || command.contains("node --test");
     let is_go = command.contains("go test");
-    let has_node_test_summary = lines.iter().any(|line| {
-        line.trim_start()
-            .strip_prefix('ℹ')
-            .is_some_and(|summary| summary.trim_start().starts_with("fail "))
+    let has_node_test_summary = ["tests", "pass", "fail"].iter().all(|expected| {
+        lines
+            .iter()
+            .any(|line| node_test_summary_key(line) == Some(expected))
     });
 
     let mut failures = Vec::new();
@@ -226,21 +261,8 @@ fn extract_test_summary(output: &str, command: &str) -> String {
 
         if is_jest {
             let trimmed = line.trim_start();
-            let is_node_summary = trimmed.strip_prefix('ℹ').is_some_and(|summary| {
-                matches!(
-                    summary.split_whitespace().next(),
-                    Some(
-                        "tests"
-                            | "suites"
-                            | "pass"
-                            | "fail"
-                            | "cancelled"
-                            | "skipped"
-                            | "todo"
-                            | "duration_ms"
-                    )
-                )
-            });
+            let is_node_summary =
+                has_node_test_summary && node_test_summary_key(line).is_some();
             if line.contains("Tests:") || line.contains("Test Suites:") || is_node_summary {
                 result.push(line.to_string());
             }
@@ -347,5 +369,19 @@ mod tests {
         assert!(filtered.contains("[FAIL]"), "got: {filtered}");
         assert!(filtered.contains("✖ rejects a FAIL response"), "got: {filtered}");
         assert!(filtered.contains("ℹ fail 1"), "got: {filtered}");
+    }
+
+    #[test]
+    fn partial_node_summary_log_does_not_hide_jest_failure() {
+        let output = "console.log
+  ℹ fail 0
+FAIL src/example.test.js
+Tests: 1 failed, 1 total
+";
+
+        let filtered = extract_test_summary(output, "npm test");
+
+        assert!(filtered.contains("[FAIL]"), "got: {filtered}");
+        assert!(filtered.contains("FAIL src/example.test.js"), "got: {filtered}");
     }
 }
