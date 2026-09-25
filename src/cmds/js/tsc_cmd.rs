@@ -76,6 +76,24 @@ fn clean_line(line: &str) -> Cow<'_, str> {
     }
 }
 
+/// Flags whose native output is the signal — config dumps, file lists, init,
+/// help, version — so diagnostic filtering would only destroy information.
+const INFORMATIONAL_FLAGS: &[&str] = &[
+    "--showConfig",
+    "--listFiles",
+    "--listFilesOnly",
+    "--init",
+    "--help",
+    "-h",
+    "--version",
+    "-v",
+];
+
+fn is_informational_invocation(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| INFORMATIONAL_FLAGS.contains(&arg.as_str()))
+}
+
 /// `runner` is the package runner the user named (`bunx tsc`, `npx tsc`), or
 /// None for a bare `rtk tsc` where nothing was specified and detection applies.
 pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
@@ -98,10 +116,21 @@ pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: {} {}", via, args.join(" "));
     }
 
+    let args_display = args.join(" ");
+    if is_informational_invocation(args) {
+        return runner::run(
+            cmd,
+            "tsc",
+            &args_display,
+            runner::RunMode::Passthrough,
+            runner::RunOptions::default(),
+        );
+    }
+
     runner::run_streamed(
         cmd,
         "tsc",
-        &args.join(" "),
+        &args_display,
         Box::new(BlockStreamFilter::new(TscHandler::new())),
         runner::RunOptions::with_tee("tsc"),
     )
@@ -372,6 +401,40 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn informational_flags_bypass_diagnostic_filtering() {
+        for flag in [
+            "--showConfig",
+            "--listFiles",
+            "--listFilesOnly",
+            "--init",
+            "--help",
+            "-h",
+            "--version",
+            "-v",
+        ] {
+            assert!(
+                is_informational_invocation(&[flag.to_string()]),
+                "{flag} should be informational"
+            );
+        }
+    }
+
+    #[test]
+    fn regular_typecheck_args_stay_on_filtered_path() {
+        assert!(!is_informational_invocation(&[]));
+        assert!(!is_informational_invocation(&["--noEmit".to_string()]));
+        assert!(!is_informational_invocation(&[
+            "-p".to_string(),
+            "tsconfig.json".to_string(),
+        ]));
+        // Mixed: an informational flag still selects passthrough.
+        assert!(is_informational_invocation(&[
+            "--noEmit".to_string(),
+            "--listFiles".to_string(),
+        ]));
+    }
 
     #[test]
     fn test_filter_tsc_output() {
