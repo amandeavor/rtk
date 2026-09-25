@@ -6637,19 +6637,19 @@ fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
     let expected_hook_cmd = hook_path.to_string_lossy().to_string();
     if settings_path.exists() {
         let content = fs::read_to_string(&settings_path)?;
-        if let Ok(mut settings) = from_json_str::<serde_json::Value>(&content) {
-            if remove_gemini_hook_from_json(&mut settings, &expected_hook_cmd) {
-                if dry_run {
-                    println!(
-                        "[dry-run] would remove RTK hook from Gemini settings.json: {}",
-                        settings_path.display()
-                    );
-                } else {
-                    let new_content = serde_json::to_string_pretty(&settings)?;
-                    fs::write(&settings_path, new_content)?;
-                }
-                removed.push("Gemini settings.json: removed RTK hook entry".to_string());
+        if let Ok(mut settings) = from_json_str::<serde_json::Value>(&content)
+            && remove_gemini_hook_from_json(&mut settings, &expected_hook_cmd)
+        {
+            if dry_run {
+                println!(
+                    "[dry-run] would remove RTK hook from Gemini settings.json: {}",
+                    settings_path.display()
+                );
+            } else {
+                let new_content = serde_json::to_string_pretty(&settings)?;
+                fs::write(&settings_path, new_content)?;
             }
+            removed.push("Gemini settings.json: removed RTK hook entry".to_string());
         }
     }
 
