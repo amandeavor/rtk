@@ -76,9 +76,6 @@ fn clean_line(line: &str) -> Cow<'_, str> {
     }
 }
 
-/// `runner` is the package runner the user named (`bunx tsc`, `npx tsc`), or
-/// None for a bare `rtk tsc` where nothing was specified and detection applies.
-
 const INFORMATIONAL_FLAGS: &[&str] = &[
     "--showConfig",
     "--listFiles",
@@ -95,6 +92,8 @@ fn is_informational_invocation(args: &[String]) -> bool {
         .any(|arg| INFORMATIONAL_FLAGS.contains(&arg.as_str()))
 }
 
+/// `runner` is the package runner the user named (`bunx tsc`, `npx tsc`), or
+/// None for a bare `rtk tsc` where nothing was specified and detection applies.
 pub fn run(runner: Option<&str>, args: &[String], verbose: u8) -> Result<i32> {
     let tsc_exists = tool_exists("tsc");
 
