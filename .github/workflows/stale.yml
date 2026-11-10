@@ -12,14 +12,19 @@ on:
     - cron: '0 6 * * 1'
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  issues: write
+  pull-requests: write
 
 jobs:
   stale:
     runs-on: ubuntu-latest
+    env:
+      APP_CLIENT_ID: ${{ secrets.APP_CLIENT_ID }}
     steps:
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
+        if: env.APP_CLIENT_ID != ''
         with:
           client-id: ${{ secrets.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -28,7 +33,7 @@ jobs:
 
       - uses: actions/stale@v9
         with:
-          repo-token: ${{ steps.app-token.outputs.token }}
+          repo-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           # --- Issues & PRs ---
           days-before-stale: 90
           days-before-close: 7
