@@ -164,9 +164,12 @@ jobs:
     name: Create Release
     needs: [build, build-deb, build-rpm]
     runs-on: ubuntu-latest
+    env:
+      APP_CLIENT_ID: ${{ secrets.APP_CLIENT_ID }}
     steps:
       - uses: actions/create-github-app-token@v3
         id: app-token
+        if: env.APP_CLIENT_ID != ''
         with:
           client-id: ${{ secrets.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -218,7 +221,7 @@ jobs:
           tag_name: ${{ steps.version.outputs.version }}
           files: release/*
           prerelease: ${{ inputs.prerelease }}
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
 
   notify-discord:
     name: Notify Discord
